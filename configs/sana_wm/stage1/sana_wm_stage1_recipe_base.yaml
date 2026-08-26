@@ -1,10 +1,17 @@
-# SANA-WM stage-1 LoRA baseline (node 0).
+# SANA-WM stage-1 baseline recipe (node 0).
 #
-# Same data path, objective and CP settings as the released bidirectional stage-1
-# recipe; the base DiT is frozen and only LoRA adapters train. This is the file
-# agents copy and modify when they change the data recipe: add shards under
-# data.data_dir, adjust caption_proportion / data_repeat / external_data_filter,
-# and set train.max_steps to match how much data was added.
+# Identical objective, optimizer and CP2/FSDP2 settings to the released bidirectional
+# stage-1 recipe; only the data configuration is meant to change. Every node trains
+# from the released base checkpoint, so checkpoints are never chained and only the
+# newest is retained.
+#
+# This is the file agents copy and modify: add shards under data.data_dir, adjust
+# caption_proportion / data_repeat / external_data_filter, and set train.max_steps to
+# match how much data was added.
+#
+# Training writes a merged, inference-loadable checkpoint at
+#   <work_dir>/checkpoints/epoch_<E>_step_<S>.pth
+# alongside the sharded FSDP state, which the kernel discards after evaluation.
 task: ti2v
 data:
   hf_dataset_repo: null
@@ -123,14 +130,14 @@ train:
   train_batch_size: 1
   train_batch_size_image: 1
   num_epochs: 500
-  early_stop_hours: 6
+  early_stop_hours: 8
   max_steps: 400          # agents choose this from how much data they added
   gradient_accumulation_steps: 1
   grad_checkpointing: true
   gradient_clip: 0.5
   optimizer:
     type: AdamW
-    lr: 1.0e-4
+    lr: 1.0e-5
     betas: [0.9, 0.999]
     eps: 1.0e-10
     weight_decay: 0.0
@@ -139,23 +146,18 @@ train:
   lr_schedule_args:
     num_warmup_steps: 0
   log_interval: 10
-  save_model_steps: 100
+  save_model_steps: 200
   save_model_epochs: 5
-  checkpoint_total_limit: 2
+  checkpoint_total_limit: 1
   visualize: false
   deterministic_validation: true
   online_metric: false
-  work_dir: output/sana_wm_stage1_lora
+  work_dir: output/sana_wm_recipe
   ema_update: false
   timestep_weight: false
   noise_multiplier: 0.0
   ltx_image_condition_prob: 0.9
   extra:
-    lora:
-      r: 32
-      alpha: 64
-      dropout: 0.0
-      targets: [q_linear, kv_linear, proj]
     cp:
       scan_backend: triton
       triton_block_fusion: true
@@ -163,11 +165,11 @@ train:
         reshard_after_forward: false
         limit_all_gathers: false
         backward_prefetch: backward_pre
-work_dir: output/sana_wm_stage1_lora
+work_dir: output/sana_wm_recipe
 resume_from: null
 load_from: null
 caching: false
 report_to: none
-tracker_project_name: sana-wm-stage1-lora
-name: stage1_lora_base
+tracker_project_name: sana-wm-recipe
+name: recipe_base
 loss_report_name: loss
