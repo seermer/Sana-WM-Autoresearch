@@ -36,6 +36,8 @@ class VideoDataCamCtrlConfig(VideoDataConfig):
     # Training-mixture fields; harmless at inference time but required so
     # pyrallis can deserialise the YAML.
     data_repeat: Optional[Dict[str, int]] = None
+    # Temporal crop in latent frames; the main memory lever for small GPUs.
+    latent_frames: Optional[int] = None
     shuffle_mode: str = "zip_group"
     external_caption_suffixes: List[str] = field(default_factory=list)
     return_raymap: bool = True

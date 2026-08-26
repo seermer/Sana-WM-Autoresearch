@@ -62,6 +62,7 @@ class SanaWMZipLatentDataset(Dataset):
         transform=None,
         resolution: int = 720,
         num_frames: int | None = None,
+        latent_frames: int | None = None,
         length: int | None = None,
         min_latent_file_size: int = 10 * 1024 * 1024,
         caption_proportion: dict | None = None,
@@ -81,6 +82,12 @@ class SanaWMZipLatentDataset(Dataset):
 
         self.resolution = int(resolution)
         self.num_frames = None if num_frames is None else int(num_frames)
+        # Temporal crop in LATENT frames. `num_frames` is compared against both the
+        # latent T and the raw pose count, which are in different units, so using it to
+        # shorten sequences silently freezes the camera track. Cropping the latent only
+        # is correct: per-latent poses are subsampled from the full pose array at
+        # vae_time_stride and then clamped to the latent length.
+        self.latent_frames = None if latent_frames is None else int(latent_frames)
         self.min_latent_file_size = int(min_latent_file_size)
         self.caption_proportion = caption_proportion if caption_proportion is not None else {"prompt": 1.0}
         self.external_caption_suffixes = list(external_caption_suffixes or [])
@@ -271,6 +278,8 @@ class SanaWMZipLatentDataset(Dataset):
         latent = torch.from_numpy(np.asarray(latent)).float()
         if self.num_frames is not None and latent.shape[1] > self.num_frames:
             latent = latent[:, : self.num_frames]
+        if self.latent_frames is not None and latent.shape[1] > self.latent_frames:
+            latent = latent[:, : self.latent_frames]
         return latent
 
     def _read_info(self, item: dict) -> dict:
