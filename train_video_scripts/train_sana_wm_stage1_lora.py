@@ -80,9 +80,13 @@ def main() -> None:
 
     def save_checkpoint(work_dir, epoch, model, accelerator=None, step=None, **kw):
         model = accelerator.unwrap_model(model) if accelerator is not None else model
+        import torch.distributed as dist
+
         out = Path(work_dir).parent / "lora" / f"step_{step or 0}"
         save_adapter(model, out, r=int(lora["r"]), alpha=float(lora["alpha"]),
                      targets=tuple(lora["targets"]), pattern=lora["pattern"])
+        if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+            return str(out)
         latest = Path(work_dir).parent / "lora" / "latest"
         if latest.is_symlink() or latest.exists():
             latest.unlink()

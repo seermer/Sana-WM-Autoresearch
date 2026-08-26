@@ -115,7 +115,7 @@ scheduler:
   logit_std: 1.0
   vis_sampler: flow_dpm-solver
 train:
-  use_fsdp: false
+  use_fsdp: true
   fsdp_version: 2
   cp_size: 2
   num_workers: 12

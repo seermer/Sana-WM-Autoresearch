@@ -76,21 +76,32 @@ def _clean(name: str) -> str:
     return name.replace("._orig_mod.", ".").replace(".module.", ".")
 
 
+def _gather(t: torch.Tensor) -> torch.Tensor:
+    """FSDP2 shards parameters as DTensors; full_tensor() is a collective, so every
+    rank must reach it even though only rank 0 writes the file."""
+    if hasattr(t, "full_tensor"):
+        t = t.full_tensor()
+    return t.detach().float().cpu()
+
+
 def save_adapter(model: nn.Module, out_dir: str | Path, r: int, alpha: float,
                  targets=DEFAULT_TARGETS, pattern: str | None = None) -> Path:
     """Write adapter_config.json + adapter_model.safetensors in peft layout."""
+    import torch.distributed as dist
     from safetensors.torch import save_file
 
     out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
     sd = {}
     for name, mod in model.named_modules():
         if isinstance(mod, LoRALinear):
             key = _clean(name)
-            sd[f"base_model.model.{key}.lora_A.weight"] = mod.lora_A.detach().float().cpu()
-            sd[f"base_model.model.{key}.lora_B.weight"] = mod.lora_B.detach().float().cpu()
+            sd[f"base_model.model.{key}.lora_A.weight"] = _gather(mod.lora_A)
+            sd[f"base_model.model.{key}.lora_B.weight"] = _gather(mod.lora_B)
     if not sd:
         raise RuntimeError("save_adapter found no LoRALinear modules")
+    if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
+        return out
+    out.mkdir(parents=True, exist_ok=True)
     save_file(sd, str(out / "adapter_model.safetensors"))
     (out / "adapter_config.json").write_text(json.dumps({
         "peft_type": "LORA", "r": r, "lora_alpha": alpha,
