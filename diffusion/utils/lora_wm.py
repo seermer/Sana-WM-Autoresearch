@@ -1,8 +1,13 @@
 """Minimal LoRA for the SANA-WM stage-1 DiT.
 
-Hand-rolled rather than peft-wrapped: the WM DiT has a custom forward signature
-and runs under context parallel, and module renaming breaks both. Adapters are
-saved in peft's on-disk layout so any peft-compatible loader can merge them.
+Implemented as parameters registered on the existing ``nn.Linear`` plus a forward
+hook, NOT as a wrapper module. Replacing the module changes the tree that FSDP2's
+auto-wrap and the context-parallel machinery introspect, which makes gradient
+checkpointing recompute a differently-shaped parameter and raises CheckpointError.
+Keeping module identity avoids that entirely.
+
+Adapters are written in peft's on-disk layout so any peft-compatible loader can
+merge them.
 """
 from __future__ import annotations
 
@@ -17,30 +22,11 @@ import torch.nn as nn
 DEFAULT_TARGETS = ("q_linear", "kv_linear", "proj")
 
 
-class LoRALinear(nn.Module):
-    def __init__(self, base: nn.Linear, r: int, alpha: float, dropout: float = 0.0):
-        super().__init__()
-        self.base = base
-        self.r, self.scale = r, alpha / r
-        self.lora_A = nn.Parameter(torch.zeros(r, base.in_features))
-        self.lora_B = nn.Parameter(torch.zeros(base.out_features, r))
-        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        for p in self.base.parameters():
-            p.requires_grad_(False)
-
-    @property
-    def weight(self):
-        return self.base.weight
-
-    @property
-    def bias(self):
-        return self.base.bias
-
-    def forward(self, x):
-        h = self.dropout(x)
-        delta = (h.to(self.lora_A.dtype) @ self.lora_A.T) @ self.lora_B.T
-        return self.base(x) + delta.to(x.dtype) * self.scale
+def _lora_forward_hook(module: nn.Linear, args, output):
+    x = args[0]
+    h = module.lora_dropout(x) if module.lora_dropout is not None else x
+    delta = (h @ module.lora_A.transpose(0, 1)) @ module.lora_B.transpose(0, 1)
+    return output + delta * module.lora_scale
 
 
 def _matches(name: str, targets, pattern: str | None) -> bool:
@@ -49,19 +35,29 @@ def _matches(name: str, targets, pattern: str | None) -> bool:
     return name.rsplit(".", 1)[-1] in targets
 
 
+def is_lora(module: nn.Module) -> bool:
+    return hasattr(module, "lora_A") and hasattr(module, "lora_B")
+
+
 def inject(model: nn.Module, r: int = 32, alpha: float = 64.0, dropout: float = 0.0,
            targets=DEFAULT_TARGETS, pattern: str | None = None) -> list[str]:
-    """Freeze the base model and wrap every matching nn.Linear with a LoRA branch."""
+    """Freeze the base model and attach a LoRA branch to every matching nn.Linear."""
     for p in model.parameters():
         p.requires_grad_(False)
     hits = [(n, m) for n, m in model.named_modules()
-            if isinstance(m, nn.Linear) and _matches(n, targets, pattern)]
+            if isinstance(m, nn.Linear) and not is_lora(m) and _matches(n, targets, pattern)]
     if not hits:
         raise RuntimeError(f"LoRA matched no modules (targets={targets}, pattern={pattern})")
-    for name, mod in hits:
-        parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
-        setattr(parent, name.rsplit(".", 1)[-1],
-                LoRALinear(mod, r, alpha, dropout).to(mod.weight.device, mod.weight.dtype))
+    for _, mod in hits:
+        dev, dtype = mod.weight.device, mod.weight.dtype
+        a = nn.Parameter(torch.zeros(r, mod.in_features, device=dev, dtype=dtype))
+        nn.init.kaiming_uniform_(a, a=math.sqrt(5))
+        mod.register_parameter("lora_A", a)
+        mod.register_parameter("lora_B", nn.Parameter(
+            torch.zeros(mod.out_features, r, device=dev, dtype=dtype)))
+        mod.lora_scale = alpha / r
+        mod.lora_dropout = nn.Dropout(dropout) if dropout > 0 else None
+        mod.register_forward_hook(_lora_forward_hook)
     return [n for n, _ in hits]
 
 
@@ -93,12 +89,12 @@ def save_adapter(model: nn.Module, out_dir: str | Path, r: int, alpha: float,
     out = Path(out_dir)
     sd = {}
     for name, mod in model.named_modules():
-        if isinstance(mod, LoRALinear):
+        if is_lora(mod):
             key = _clean(name)
             sd[f"base_model.model.{key}.lora_A.weight"] = _gather(mod.lora_A)
             sd[f"base_model.model.{key}.lora_B.weight"] = _gather(mod.lora_B)
     if not sd:
-        raise RuntimeError("save_adapter found no LoRALinear modules")
+        raise RuntimeError("save_adapter found no LoRA-augmented modules")
     if dist.is_available() and dist.is_initialized() and dist.get_rank() != 0:
         return out
     out.mkdir(parents=True, exist_ok=True)
