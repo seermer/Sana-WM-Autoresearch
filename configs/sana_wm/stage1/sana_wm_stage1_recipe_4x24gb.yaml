@@ -22,6 +22,9 @@
 #     CP=1, 25 frames  27.9 GB   19 s/step
 #     CP=1,  9 frames  23.5 GB    7 s/step
 #     CP=1, 13 frames  22.4 GB   10 s/step   (5 ranks)
+#     CP=1,  9 frames  21.3 GB    7 s/step   (5 ranks)  <- most margin
+#
+# If a card gives you less than ~22 GB usable, drop latent_frames to 9.
 #
 # Horizon caveat: 9 latent frames is ~4s of video at 16 fps, while a WBench
 # navigation case runs ~16s. This trains shorter-horizon camera control than the model
