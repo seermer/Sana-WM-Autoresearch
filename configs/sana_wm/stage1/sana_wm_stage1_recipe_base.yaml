@@ -130,6 +130,8 @@ train:
   train_batch_size: 1
   train_batch_size_image: 1
   num_epochs: 500
+  # early_stop_hours is what actually binds: at ~120 s/step, 400 steps would need
+  # ~13 h. Set it from the time the kernel says is left, not from this default.
   early_stop_hours: 8
   max_steps: 400          # agents choose this from how much data they added
   gradient_accumulation_steps: 1
@@ -146,7 +148,11 @@ train:
   lr_schedule_args:
     num_warmup_steps: 0
   log_interval: 10
-  save_model_steps: 200
+  # Must land comfortably before early_stop_hours: a run stopped before its first
+  # save produces no checkpoint at all and the node is discarded having spent every
+  # GPU-hour. At ~120 s/step this saves around 3.4 h in; the kernel prunes the
+  # superseded copies, so saving more often costs nothing lasting.
+  save_model_steps: 100
   save_model_epochs: 5
   checkpoint_total_limit: 1
   visualize: false
