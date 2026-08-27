@@ -1,26 +1,37 @@
-# SANA-WM stage-1 recipe for small GPUs: fits 4x24GB (and therefore 5x24GB).
+# SANA-WM stage-1 recipe for 4x24GB. Measured peak: 23.5 GB/rank, 7s/step.
 #
-# Same objective and data path as the 8x80GB baseline recipe. What changed, in order
-# of how much memory each saves:
-#   latent_frames: 41   crop the sequence from 121 to 41 latent frames (~20s @16fps).
-#                       Activations dominate, and they scale with sequence length.
-#                       This is a LATENT-frame crop; `num_frames` cannot be used for
-#                       this because it also slices the raw pose array, which is in
-#                       raw-frame units, and would freeze the camera track.
-#   cp_size: 4          shard the sequence across all 4 ranks (dp=1).
-#   AdamW8bit           bitsandbytes 8-bit moments instead of fp32.
-#   reshard_after_forward: true   re-shard params after forward; costs extra
-#                       all-gathers in backward, saves peak.
-#   gradient_accumulation_steps: 8   recovers effective batch size.
+# Same objective, data path and optimizer as the 8x80GB baseline. Two changes carry
+# almost all of the memory saving, and the first is counter-intuitive:
 #
-# Launch on 4 GPUs:
+#   cp_size: 1        Context parallel is OFF. The fused GDN context-parallel Triton
+#                     kernels allocate ~5 GB/rank of scratch OUTSIDE PyTorch's
+#                     allocator, and `triton_block_fusion: true` is mandatory whenever
+#                     CP is on (BidirectionalGDNTriton raises NotImplementedError
+#                     without it), so CP's cost cannot be separated from CP. Turning it
+#                     off costs throughput at equal sequence length but is the single
+#                     largest saving. FSDP2 still shards the model across all ranks.
+#
+#   latent_frames     Only matters once CP is off. Under CP each rank held 1/N of the
+#                     sequence, so cutting frames 64% saved 1.0 GB; without CP each rank
+#                     holds all of it and the same cut saves 4.4 GB.
+#
+# Measured on A100-80GB, per-process resident memory (nvidia-smi --query-compute-apps),
+# 4 ranks unless noted:
+#     CP=4, 25 frames  32.8 GB   10 s/step
+#     CP=4,  9 frames  31.8 GB
+#     CP=1, 25 frames  27.9 GB   19 s/step
+#     CP=1,  9 frames  23.5 GB    7 s/step
+#     CP=1, 13 frames  22.4 GB   10 s/step   (5 ranks)
+#
+# Horizon caveat: 9 latent frames is ~4s of video at 16 fps, while a WBench
+# navigation case runs ~16s. This trains shorter-horizon camera control than the model
+# is evaluated on. Raise latent_frames if you have memory to spare.
+#
+# Launch:
 #   torchrun --nproc_per_node=4 train_video_scripts/train_sana_wm_stage1.py \
-#     --config_path configs/sana_wm/stage1/sana_wm_stage1_recipe_lowmem.yaml
-# On 5 GPUs set train.cp_size: 5 to keep dp=1, or leave it at 4 for dp=1 + 1 spare.
+#     --config_path configs/sana_wm/stage1/sana_wm_stage1_recipe_4x24gb.yaml
 #
-# A shorter sequence teaches shorter-horizon camera control. WBench navigation cases
-# are ~16s, so 41 latent frames covers a full case; raise latent_frames if you have
-# the memory and care about longer-horizon consistency.
+# Agents: copy this file and edit the data section, as with the baseline recipe.
 # SANA-WM stage-1 baseline recipe (node 0).
 #
 # Identical objective, optimizer and CP2/FSDP2 settings to the released bidirectional
@@ -61,7 +72,7 @@ data:
   load_vae_feat: true
   vae_cache_dir: data/vae_cache/LTX2VAE_diffusers_704x1280/sekai_game_train_961frames_16fps_ovl640
   num_frames: 961
-  latent_frames: 41          # ~20s at 16fps; the main memory lever
+  latent_frames: 9
   sort_dataset: false
   shuffle_dataset: true
   shuffle_mode: item
@@ -148,7 +159,7 @@ scheduler:
 train:
   use_fsdp: true
   fsdp_version: 2
-  cp_size: 4                 # shard the sequence over all 4 ranks (dp=1)
+  cp_size: 1                 # context parallel OFF; see the header
   num_workers: 4
   seed: 3407
   train_batch_size: 1
@@ -156,11 +167,11 @@ train:
   num_epochs: 500
   early_stop_hours: 8
   max_steps: 400          # agents choose this from how much data they added
-  gradient_accumulation_steps: 8   # keeps the effective batch at batch_size 1
+  gradient_accumulation_steps: 8   # recovers effective batch at batch_size 1
   grad_checkpointing: true
   gradient_clip: 0.5
   optimizer:
-    type: AdamW8bitWrapper    # bitsandbytes; ~4x smaller optimizer state than fp32 AdamW
+    type: AdamW
     lr: 1.0e-5
     betas: [0.9, 0.999]
     eps: 1.0e-10
@@ -176,24 +187,24 @@ train:
   visualize: false
   deterministic_validation: true
   online_metric: false
-  work_dir: output/sana_wm_recipe_lowmem
+  work_dir: output/sana_wm_sana_wm_stage1_recipe_4x24gb
   ema_update: false
   timestep_weight: false
   noise_multiplier: 0.0
   ltx_image_condition_prob: 0.9
   extra:
     cp:
-      scan_backend: triton
-      triton_block_fusion: true
+      scan_backend: torch
+      triton_block_fusion: false
       fsdp2:
-        reshard_after_forward: true    # trade all-gathers for peak memory
+        reshard_after_forward: true
         limit_all_gathers: false
         backward_prefetch: backward_pre
-work_dir: output/sana_wm_recipe_lowmem
+work_dir: output/sana_wm_sana_wm_stage1_recipe_4x24gb
 resume_from: null
 load_from: null
 caching: false
 report_to: none
 tracker_project_name: sana-wm-recipe
-name: recipe_lowmem
+name: sana_wm_stage1_recipe_4x24gb
 loss_report_name: loss
